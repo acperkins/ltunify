@@ -1,0 +1,45 @@
+.Dd May 30, 2020
+.Dt LTUNIFY 1
+.Os Linux
+.Sh NAME
+.Nm ltunify
+.Nd Logitech Unifying tool
+.Sh SYNOPSIS
+.Nm
+.Op Fl d Ar path
+.Op Fl D
+.Op Fl h
+.Ar command
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Ar list
+Show all paired devices
+.It Ar pair Op Ar timeout
+Try to pair within "timeout" seconds
+(1 to 255, default to 0 which is an alias for 30s)
+.It Ar unpair Ar idx
+Unpair device
+.It Ar info Ar idx
+Show more detailed information for a device
+.It Ar receiver-info
+Show information about the receiver
+.El
+.Pp
+In the above lines, "idx" refers to the device number shown in the first
+column of the list command (between 1 and 6).
+Alternatively, you can use the following names (case-insensitive):
+.Pp
+.Bl -bullet
+.It
+Keyboard
+.It
+Mouse
+.It
+Numpad
+.It
+Presenter
+.It
+Trackball
+.It
+Touchpad
+.El

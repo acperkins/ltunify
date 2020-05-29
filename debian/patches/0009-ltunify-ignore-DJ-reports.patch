@@ -1,0 +1,37 @@
+From 2e2b21d3cc6c33aaac077a2bfd1a09df0ea33c13 Mon Sep 17 00:00:00 2001
+From: Peter Wu <lekensteyn@gmail.com>
+Date: Fri, 30 Aug 2013 12:01:05 +0200
+Subject: [PATCH 09/24] ltunify: ignore DJ reports
+
+Fixes the warning messages below:
+
+$ ltunify unpair 2
+Unexpected disconnection type 0000
+Device 0x02 Touchpad successfully unpaired
+$ ltunify pair
+Please turn your wireless device off and on to start pairing.
+Found new device, id=0x02 Touchpad
+Dev conn notif is expected to be short, got 0x20 instead
+Dev conn notif is expected to be short, got 0x20 instead
+Dev conn notif is expected to be short, got 0x20 instead
+Dev conn notif is expected to be short, got 0x20 instead
+Dev conn notif is expected to be short, got 0x20 instead
+---
+ ltunify.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+--- a/ltunify.c
++++ b/ltunify.c
+@@ -414,6 +414,12 @@ static bool do_read_skippy(int fd, struc
+ 		if (msg->report_id == exp_report_id && msg->sub_id == exp_sub_id) {
+ 			return true;
+ 		}
++
++		/* ignore non-HID++ reports (e.g. DJ reports) */
++		if (msg->report_id != SHORT_MESSAGE && msg->report_id != LONG_MESSAGE) {
++			continue;
++		}
++
+ 		// guess: 0xFF is error message in HID++ 2.0?
+ 		if (msg->report_id == LONG_MESSAGE && msg->sub_id == 0xFF) {
+ 			if (debug_enabled) {

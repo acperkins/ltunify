@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component>
+  <id>nl.lekensteyn.ltunify</id>
+  <metadata_license>gpl-3.0+</metadata_license>
+  <name>ltunify</name>
+  <summary>Manage Logitech unifying receivers</summary>
+  <description>
+    <p>Pair and manage Logitech devices that use the unifying receiver.</p>
+  </description>
+  <provides>
+    <modalias>usb:v046DpC52Bd*</modalias>
+  </provides>
+</component>

@@ -1,0 +1,14 @@
+Source: ltunify
+Section: utils
+Priority: optional
+Maintainer: Anthony Perkins <anthony@acperkins.com>
+Build-Depends: debhelper (>=11~)
+Standards-Version: 4.1.4
+Homepage: https://lekensteyn.nl/logitech-unifying.html
+
+Package: ltunify
+Architecture: any
+Multi-Arch: foreign
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Description: manage Logitech unifying receivers
+ Pair and manage Logitech devices that use the unifying receiver.

@@ -1,0 +1,6 @@
+ltunify (0.2-1) experimental; urgency=low
+
+  * Initial release. Closes #962102.
+  * Add debian/ directory to copyright.
+
+ -- Anthony Perkins <anthony@acperkins.com>  Fri, 29 May 2020 13:32:05 +0100

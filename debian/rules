@@ -1,0 +1,11 @@
+#!/usr/bin/make -f
+export DH_VERBOSE = 1
+
+%:
+	dh $@
+
+override_dh_auto_install:
+	dh_auto_install -- bindir=/usr/bin udevrulesdir=/usr/lib/udev/rules.d
+
+override_dh_clean:
+	dh_clean

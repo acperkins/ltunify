@@ -1,0 +1,21 @@
+From 7e7bbbdabde14d46d8346c9f8f68c39130ed1bc5 Mon Sep 17 00:00:00 2001
+From: Peter Wu <lekensteyn@gmail.com>
+Date: Wed, 21 Aug 2013 00:57:05 +0200
+Subject: [PATCH 04/24] Fix missing device version information for hid10
+
+This got broken in e2faf04 (version 0.2).
+---
+ ltunify.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/ltunify.c
++++ b/ltunify.c
+@@ -905,7 +905,7 @@ void gather_device_info(int fd, u8 devic
+ 		get_hidpp_version(fd, device_index, &dev->hidpp_version);
+ 		get_device_ext_pair_info(fd, device_index);
+ 		get_device_name(fd, device_index);
+-		if (dev->hidpp_version.major == 0 && dev->hidpp_version.minor == 0) {
++		if (dev->hidpp_version.major == 1 && dev->hidpp_version.minor == 0) {
+ 			if (get_device_versions(fd, device_index, &dev->version)) {
+ 				dev->device_available = true;
+ 			}
