@@ -31,20 +31,24 @@
 #include <getopt.h> /* for getopt_long */
 #include <poll.h>
 #include <libgen.h> /* for basename, used during discovery */
+#include <time.h> /* needs -lrt, for clock_gettime as timeout helper */
+#include <stdarg.h>
 
 #ifndef PACKAGE_VERSION
-#	define PACKAGE_VERSION "0.2"
+#	define PACKAGE_VERSION "0.3"
 #endif
 
 #define ARRAY_SIZE(a) (sizeof (a) / sizeof *(a))
 
 // pass -D option to print very verbose details like protocol communication
 static bool debug_enabled;
+#define DPRINTF(...) if (debug_enabled) { fprintf(stderr, __VA_ARGS__); }
 
 typedef unsigned char u8;
 
 #define VID_LOGITECH		0x046d
 #define PID_NANO_RECEIVER	0xc52f
+#define PID_NANO_RECEIVER_2	0xc534
 
 #define HEADER_SIZE		3
 #define SHORT_MESSAGE           0x10
@@ -134,6 +138,7 @@ struct msg_dev_name {
 
 struct notif_devcon {
 #define DEVCON_PROT_UNIFYING	0x04
+#define DEVCON_PROT_NANO_LITE	0x0a
 	u8 prot_type; // bits 0..2 is protocol type (4 for unifying), 3..7 is reserved
 #define DEVCON_DEV_TYPE_MASK	0x0f
 // Link status: 0 is established (in range), 1 is not established (out of range)
@@ -225,19 +230,19 @@ struct receiver_info receiver;
 
 // error messages for type=8F (ERROR_MSG)
 static const char * error_messages[0x100] = {
-	[0x01] = "SUCCESS",
-	[0x02] = "INVALID_SUBID",
-	[0x03] = "INVALID_ADDRESS",
-	[0x04] = "INVALID_VALUE",
-	[0x05] = "CONNECT_FAIL",
-	[0x06] = "TOO_MANY_DEVICES",
-	[0x07] = "ALREADY_EXISTS",
-	[0x08] = "BUSY",
-	[0x09] = "UNKNOWN_DEVICE",
-	[0x0a] = "RESOURCE_ERROR",
-	[0x0b] = "REQUEST_UNAVAILABLE",
-	[0x0c] = "INVALID_PARAM_VALUE",
-	[0x0d] = "WRONG_PIN_CODE",
+	[0x00] = "SUCCESS",
+	[0x01] = "INVALID_SUBID",
+	[0x02] = "INVALID_ADDRESS",
+	[0x03] = "INVALID_VALUE",
+	[0x04] = "CONNECT_FAIL",
+	[0x05] = "TOO_MANY_DEVICES",
+	[0x06] = "ALREADY_EXISTS",
+	[0x07] = "BUSY",
+	[0x08] = "UNKNOWN_DEVICE",
+	[0x09] = "RESOURCE_ERROR",
+	[0x0A] = "REQUEST_UNAVAILABLE",
+	[0x0B] = "INVALID_PARAM_VALUE",
+	[0x0C] = "WRONG_PIN_CODE",
 };
 
 static const char * device_type[0x10] = {
@@ -306,18 +311,25 @@ static void dump_msg(struct hidpp_message *msg, size_t payload_size, const char 
 	fflush(NULL);
 }
 
-static ssize_t do_io(int fd, struct hidpp_message *msg, bool is_write, int timeout) {
-        ssize_t r;
-        size_t payload_size = SHORT_MESSAGE_LEN;
+static long long unsigned get_timestamp_ms(void) {
+	struct timespec tp;
+	clock_gettime(CLOCK_MONOTONIC, &tp);
+	return tp.tv_sec * 1000 + tp.tv_nsec / 1000000;
+}
 
-        if (msg->report_id == LONG_MESSAGE) {
-                payload_size = LONG_MESSAGE_LEN;
-        }
+#include <execinfo.h>
+static ssize_t do_read(int fd, struct hidpp_message *msg, u8 expected_report_id, int timeout) {
+	ssize_t r;
+	size_t payload_size = LONG_MESSAGE_LEN;
+	long long unsigned begin_ms, end_ms;
 
-	if (is_write) {
-		dump_msg(msg, payload_size, "wr");
-		r = write(fd, msg, payload_size);
-	} else {
+	if (expected_report_id == SHORT_MESSAGE) {
+		payload_size = SHORT_MESSAGE_LEN;
+	}
+
+	begin_ms = get_timestamp_ms();
+
+	while (timeout > 0) {
 		struct pollfd pollfd;
 		pollfd.fd = fd;
 		pollfd.events = POLLIN;
@@ -327,32 +339,55 @@ static ssize_t do_io(int fd, struct hidpp_message *msg, bool is_write, int timeo
 			perror("poll");
 			return 0;
 		} else if (r == 0) {
+			DPRINTF("poll timeout reached!\n");
 			// timeout
 			return 0;
 		}
 
+		memset(msg, 0, payload_size);
 		r = read(fd, msg, payload_size);
-		if (r >= 0) {
-			int saved_errno = errno;
+		if (r < 0) {
+			perror("read");
+			return 0;
+		} else if (r > 0) {
 			dump_msg(msg, r, "rd");
-			errno = saved_errno;
+			if (msg->report_id == expected_report_id) {
+				return r;
+			} else if (expected_report_id == 0 &&
+				(msg->report_id == SHORT_MESSAGE ||
+				msg->report_id == LONG_MESSAGE)) {
+				/* HACK: ping response for HID++ 2.0 is a LONG
+				 * message, but for HID++ 1.0 it is a SHORT one. */
+				return r;
+			} else {
+				DPRINTF("Skipping unexpected report ID %#x (want %#x)\n",
+					msg->report_id, expected_report_id);
+			}
 		}
-	}
-        if ((size_t) r == payload_size
-		|| (msg->report_id == SUB_ERROR_MSG && r == SHORT_MESSAGE_LEN)) {
-		return payload_size;
+
+		/* unexpected message, try again with updated timeout */
+		end_ms = get_timestamp_ms();
+		timeout -= end_ms - begin_ms;
+		begin_ms = end_ms;
 	}
 
-	if (r < 0) {
-		perror(is_write ? "write" : "read");
-	}
+	/* timeout expired, no report found unfortunately */
 	return 0;
 }
-static ssize_t do_read(int fd, struct hidpp_message *msg, int timeout) {
-	return do_io(fd, msg, false, timeout);
-}
 static ssize_t do_write(int fd, struct hidpp_message *msg) {
-	return do_io(fd, msg, true, 0);
+	ssize_t r, payload_size = SHORT_MESSAGE_LEN;
+
+	if (msg->report_id == LONG_MESSAGE) {
+		payload_size = LONG_MESSAGE_LEN;
+	}
+
+	dump_msg(msg, payload_size, "wr");
+	r = write(fd, msg, payload_size);
+	if (r < 0) {
+		perror("write");
+	}
+
+	return payload_size == r ? payload_size : 0;
 }
 
 const char *get_report_id_str(u8 report_type) {
@@ -381,7 +416,8 @@ bool process_notif_dev_connect(struct hidpp_message *msg, u8 *device_index,
 			"%#04x instead\n", msg->report_id);
 		return false;
 	}
-	if (dcon->prot_type != DEVCON_PROT_UNIFYING) {
+	if (dcon->prot_type != DEVCON_PROT_UNIFYING &&
+	    dcon->prot_type != DEVCON_PROT_NANO_LITE) {
 		fprintf(stderr, "Unknown protocol %#04x in devcon notif\n",
 			dcon->prot_type);
 		return false;
@@ -395,7 +431,7 @@ bool process_notif_dev_connect(struct hidpp_message *msg, u8 *device_index,
 	if (device_index) *device_index = dev_idx;
 	if (is_new_device) *is_new_device = !dev->device_present;
 
-	memset(&devices[dev_idx], 0, sizeof devices[dev_idx]);
+	memset(dev, 0, sizeof *dev);
 	dev->device_type = dcon->device_info & DEVCON_DEV_TYPE_MASK;
 	dev->wireless_pid = (dcon->pid_msb << 8) | dcon->pid_lsb;
 	dev->device_present = true;
@@ -407,13 +443,18 @@ bool process_notif_dev_connect(struct hidpp_message *msg, u8 *device_index,
 static bool do_read_skippy(int fd, struct hidpp_message *msg,
 	u8 exp_report_id, u8 exp_sub_id) {
 	for (;;) {
-		msg->report_id = exp_report_id;
-		if (!do_read(fd, msg, 2000)) {
+		if (!do_read(fd, msg, exp_report_id, 2000)) {
 			return false;
 		}
 		if (msg->report_id == exp_report_id && msg->sub_id == exp_sub_id) {
 			return true;
 		}
+
+		/* ignore non-HID++ reports (e.g. DJ reports) */
+		if (msg->report_id != SHORT_MESSAGE && msg->report_id != LONG_MESSAGE) {
+			continue;
+		}
+
 		// guess: 0xFF is error message in HID++ 2.0?
 		if (msg->report_id == LONG_MESSAGE && msg->sub_id == 0xFF) {
 			if (debug_enabled) {
@@ -647,8 +688,7 @@ void perform_pair(int fd, u8 timeout) {
 	puts("Please turn your wireless device off and on to start pairing.");
 	// WARNING: mess ahead. I knew it would become messy before writing it.
 	for (;;) {
-		msg.report_id = SHORT_MESSAGE;
-		if (!do_read(fd, &msg, timeout * 1000 + 2000)) {
+		if (!do_read(fd, &msg, SHORT_MESSAGE, timeout * 1000 + 2000)) {
 			fprintf(stderr, "Failed to read short message\n");
 			break;
 		}
@@ -738,11 +778,10 @@ bool get_receiver_info(int fd, struct receiver_info *rinfo) {
 	params[0] = 0x03; // undocumented
 	if (get_long_register(fd, DEVICE_RECEIVER, REG_PAIRING_INFO, params, &msg)) {
 		struct msg_receiver_info *info = (struct msg_receiver_info *) &msg.msg_long.str;
-		uint32_t *serial_numberp;
+		uint32_t serial_number;
 
-		serial_numberp = (uint32_t *) &info->serial_number;
-
-		rinfo->serial_number = ntohl(*serial_numberp);
+		memcpy(&serial_number, &info->serial_number, sizeof(serial_number));
+		rinfo->serial_number = ntohl(serial_number);
 		return true;
 	}
 	return false;
@@ -770,12 +809,11 @@ bool get_device_ext_pair_info(int fd, u8 device_index) {
 	params[0] = 0x30 | (device_index - 1); // 0x30..0x3F Unifying Device extended pairing info
 	if (get_long_register(fd, DEVICE_RECEIVER, REG_PAIRING_INFO, params, &msg)) {
 		struct msg_dev_ext_pair_info *info;
-		uint32_t *serial_numberp;
+		uint32_t serial_number;
 
 		info = (struct msg_dev_ext_pair_info *) &msg.msg_long.str;
-		serial_numberp = (uint32_t *) &info->serial_number;
-
-		dev->serial_number = ntohl(*serial_numberp);
+		memcpy(&serial_number, &info->serial_number, sizeof(serial_number));
+		dev->serial_number = ntohl(serial_number);
 		dev->power_switch_location = info->usability_info & 0x0F;
 		return true;
 	}
@@ -818,7 +856,7 @@ bool get_hidpp_version(int fd, u8 device_index, struct hidpp_version *version) {
 		return false;
 	}
 	for (;;) {
-		if (!do_read(fd, &msg, 3000)) {
+		if (!do_read(fd, &msg, 0, 3000)) {
 			if (debug_enabled) {
 				fprintf(stderr, "Failed to read HID++ version, device does not respond!\n");
 			}
@@ -905,7 +943,7 @@ void gather_device_info(int fd, u8 device_index) {
 		get_hidpp_version(fd, device_index, &dev->hidpp_version);
 		get_device_ext_pair_info(fd, device_index);
 		get_device_name(fd, device_index);
-		if (dev->hidpp_version.major == 0 && dev->hidpp_version.minor == 0) {
+		if (dev->hidpp_version.major == 1 && dev->hidpp_version.minor == 0) {
 			if (get_device_versions(fd, device_index, &dev->version)) {
 				dev->device_available = true;
 			}
@@ -974,6 +1012,13 @@ void get_device_names(int fd) {
 		}
 	}
 }
+
+static void print_version(void) {
+	fprintf(stderr,
+"Logitech Unifying tool version " PACKAGE_VERSION "\n"
+"Copyright (C) 2013 Peter Wu <lekensteyn@gmail.com>\n");
+}
+
 void print_all_devices(void) {
 	unsigned i;
 	puts("Connected devices:");
@@ -989,9 +1034,10 @@ void print_all_devices(void) {
 }
 
 static void print_usage(const char *program_name) {
-	fprintf(stderr, "Usage: %s [options] cmd [cmd options]\n"
-"Logitech Unifying tool version %s\n"
-"Copyright (C) 2013 Peter Wu <lekensteyn@gmail.com>\n"
+	fprintf(stderr, "Usage: %s [options] cmd [cmd options]\n",
+		program_name);
+	print_version();
+	fprintf(stderr,
 "\n"
 "Generic options:\n"
 "  -d, --device path Bypass detection, specify custom hidraw device.\n"
@@ -1007,8 +1053,7 @@ static void print_usage(const char *program_name) {
 "  receiver-info   - Show information about the receiver\n"
 "In the above lines, \"idx\" refers to the device number shown in the\n"
 " first column of the list command (between 1 and 6). Alternatively, you\n"
-" can use the following names (case-insensitive):\n"
-	, program_name, PACKAGE_VERSION);
+" can use the following names (case-insensitive):\n");
 	print_device_types();
 }
 
@@ -1031,11 +1076,13 @@ static int validate_args(int argc, char **argv, char ***argsp, char **hidraw_pat
 	struct option longopts[] = {
 		{ "device",     1, NULL, 'd' },
 		{ "help",       0, NULL, 'h' },
+		{ "version",	0, NULL, 'V' },
+		{ 0, 0, 0, 0 },
 	};
 
 	*argsp = NULL;
 
-	while ((opt = getopt_long(argc, argv, "+Dd:h", longopts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "+Dd:hV", longopts, NULL)) != -1) {
 		switch (opt) {
 		case 'D':
 			debug_enabled = true;
@@ -1043,6 +1090,9 @@ static int validate_args(int argc, char **argv, char ***argsp, char **hidraw_pat
 		case 'd':
 			*hidraw_path = optarg;
 			break;
+		case 'V':
+			print_version();
+			return 0;
 		case 'h':
 			print_usage(*argv);
 			return 0;
@@ -1090,6 +1140,21 @@ static int validate_args(int argc, char **argv, char ***argsp, char **hidraw_pat
 	return args_count;
 }
 
+#ifdef __GNUC__
+static FILE *fopen_format(const char *format, ...)
+__attribute__((format(printf, 1, 2)));
+#endif
+
+static FILE *fopen_format(const char *format, ...) {
+	char buf[1024];
+	va_list ap;
+
+	va_start(ap, format);
+	vsnprintf(buf, sizeof buf, format, ap);
+	va_end(ap);
+	return fopen(buf, "r");
+}
+
 #define RECEIVER_NAME "logitech-djreceiver"
 int open_hidraw(void) {
 	int fd = -1;
@@ -1104,6 +1169,8 @@ int open_hidraw(void) {
 			char *name = matches.gl_pathv[i];
 			const char *last_comp;
 			char *dev_name;
+			FILE *fp;
+			uint32_t vid = 0, pid = 0;
 
 			r = readlink(name, buf, (sizeof buf) - 1);
 			if (r < 0) {
@@ -1118,25 +1185,46 @@ int open_hidraw(void) {
 			dev_name = name + sizeof "/sys/class/hidraw";
 			*(strchr(dev_name, '/')) = 0;
 
+			// Assume that the first match is the receiver. Devices bound to the
+			// same receiver may have the same modalias.
+			if ((fp = fopen_format("/sys/class/hidraw/%s/device/modalias", dev_name))) {
+				int m = fscanf(fp, "hid:b%*04Xg%*04Xv%08Xp%08X", &vid, &pid);
+				if (m != 2) {
+					pid = 0;
+				}
+				fclose(fp);
+			}
+			if (vid != VID_LOGITECH) {
+				continue;
+			}
+
 			if (!strcmp(last_comp, RECEIVER_NAME)) {
-				/* Logitech receiver c52b and c532 - pass */
+				/* Logitech receiver c52b and c532 - pass.
+				 *
+				 * Logitech Nano receiver c534 however has
+				 * multiple hidraw devices, but the first one is
+				 * only used for keyboard events and should be
+				 * ignored. The second one is for the mouse, and
+				 * that interface has a vendor-specific HID page
+				 * for HID++.
+				 * Parsing .../device/report_descriptor is much
+				 * more complicated, so stick with knowledge
+				 * about device-specific interfaces for now.
+				 */
+				if (pid == PID_NANO_RECEIVER_2) {
+					int iface = -1;
+					if ((fp = fopen_format("/sys/class/hidraw/%s/device/../bInterfaceNumber", dev_name))) {
+						fscanf(fp, "%02x", &iface);
+						fclose(fp);
+					}
+					if (iface == 0) {
+						/* Skip first interface. */
+						continue;
+					}
+				}
 			} else if (!strcmp(last_comp, "hid-generic")) {
 				/* need to test for older nano receiver c52f */
-				FILE *fp;
-				uint32_t vid = 0, pid = 0;
-
-				// Assume that the first match is the receiver. Devices bound to the
-				// same receiver may have the same modalias.
-				snprintf(buf, sizeof buf, "/sys/class/hidraw/%s/device/modalias", dev_name);
-				if ((fp = fopen(buf, "r"))) {
-					int m = fscanf(fp, "hid:b%*04Xg%*04Xv%08Xp%08X", &vid, &pid);
-					if (m != 2) {
-						pid = 0;
-					}
-					fclose(fp);
-				}
-
-				if (vid != VID_LOGITECH || pid != PID_NANO_RECEIVER) {
+				if (pid != PID_NANO_RECEIVER) {
 					continue;
 				}
 			} else { /* unknown driver */
@@ -1160,6 +1248,10 @@ int open_hidraw(void) {
 				"for %s\n", hiddev_name);
 		} else {
 			fprintf(stderr, "No Logitech Unifying Receiver device found\n");
+			if (access("/sys/class/hidraw", R_OK)) {
+				fputs("The kernel must have CONFIG_HIDRAW enabled.\n",
+					stderr);
+			}
 			if (access("/sys/module/hid_logitech_dj", F_OK)) {
 				fprintf(stderr, "Driver is not loaded, try:"
 						"   sudo modprobe hid-logitech-dj\n");
